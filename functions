@@ -142,11 +142,10 @@ service_start() {
 
 service_url() {
   local SERVICE="$1"
+  local DATABASE="$2"
+  local USER=$(get_database_user_name "$SERVICE" "$DATABASE")
   local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
-
-  local USER="$2"  # postgres
-  local PASSWORD="$3"
-  local DATABASE_NAME="$4"
+  local PASSWORD=$(cat "$SERVICE_ROOT/auth/$USER")
   local SERVICE_ALIAS="$(service_alias "$SERVICE")"
-  echo "$PLUGIN_SCHEME://$USER:$PASSWORD@$SERVICE_ALIAS:${PLUGIN_DATASTORE_PORTS[0]}/$DATABASE_NAME"
+  echo "$PLUGIN_SCHEME://$USER:$PASSWORD@$SERVICE_ALIAS:${PLUGIN_DATASTORE_PORTS[0]}/$DATABASE"
 }

@@ -35,6 +35,7 @@ teardown() {
   dokku "$PLUGIN_COMMAND_PREFIX:link" l my_app
   run dokku "$PLUGIN_COMMAND_PREFIX:link" l my_app
   assert_contains "${lines[*]}" "Already linked as DATABASE_URL"
+  dokku "$PLUGIN_COMMAND_PREFIX:unlink" l my_app
 }
 
 @test "($PLUGIN_COMMAND_PREFIX:link) exports DATABASE_URL to app" {

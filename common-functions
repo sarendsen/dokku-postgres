@@ -80,13 +80,19 @@ is_container_status() {
 
 remove_from_links_file() {
   declare desc="Removes an app from the service link file"
-  declare SERVICE="$1" APP="$2"
+  declare SERVICE="$1" APP="$2" DATABASE="$3"
   local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
   local LINKS_FILE="$SERVICE_ROOT/LINKS"
 
+  if [[ -z "$DATABASE" ]]; then
+    local REGEX="/^$APP\$/d"
+  else
+    local REGEX="/^$APP:$DATABASE\$/d"
+  fi
+
   mkdir -p "$SERVICE_ROOT" || dokku_log_fail "Unable to create service directory"
   touch "$LINKS_FILE"
-  sed -i.bak "/^$APP\$/d" "$LINKS_FILE" && rm "$LINKS_FILE.bak"
+  sed -i.bak "$REGEX" "$LINKS_FILE" && rm "$LINKS_FILE.bak"
   sort "$LINKS_FILE" -u -o "$LINKS_FILE"
 }
 
@@ -287,8 +293,7 @@ service_info() {
   declare desc="Retrieves information about a given service"
   declare SERVICE="$1" INFO_FLAG="$2"
   local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
-  local PASSWORD=$(cat "$SERVICE_ROOT/auth/postgres")
-  local SERVICE_URL=$(service_url "$SERVICE" postgres "$PASSWORD" "$SERVICE")
+  local SERVICE_URL=$(service_url "$SERVICE" "postgres")
   local PORT_FILE="$SERVICE_ROOT/PORT"
   local SERVICE_CONTAINER_ID="$(cat "$SERVICE_ROOT/ID")"
   local flag key valid_flags
@@ -326,8 +331,9 @@ service_info() {
 service_is_linked() {
   declare desc="Links a service to an application"
   declare SERVICE="$1" APP="$2"
+  declare DATABASE=${3:-$(get_database_name "$SERVICE")}
   update_plugin_scheme_for_app "$APP"
-  local SERVICE_URL=$(service_url "$SERVICE")
+  local SERVICE_URL=$(service_url "$SERVICE" "$DATABASE")
   local EXISTING_CONFIG=$(config_all "$APP")
   local LINK=$(echo "$EXISTING_CONFIG" | grep "$SERVICE_URL" | cut -d: -f1) || true
   if [[ -z $LINK ]]; then
@@ -340,12 +346,10 @@ service_is_linked() {
 service_link() {
   declare desc="Links a service to an application"
   declare SERVICE="$1" APP="$2"
+  declare DATABASE=${3:-$(get_database_name "$SERVICE")}
   update_plugin_scheme_for_app "$APP"
   local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
-  local DATABASE=${3:-$(get_database_name "$SERVICE")}
-  local USER=$(get_database_user_name "$SERVICE" "$DATABASE")
-  local PASSWORD=$(cat "$SERVICE_ROOT/auth/$USER")
-  local SERVICE_URL=$(service_url "$SERVICE" "$USER" "$PASSWORD" "$DATABASE")
+  local SERVICE_URL=$(service_url "$SERVICE" "$DATABASE")
   local SERVICE_NAME="$(get_service_name "$SERVICE")"
   local EXISTING_CONFIG=$(config_all "$APP")
   local LINK=$(echo "$EXISTING_CONFIG" | grep "$SERVICE_URL" | cut -d: -f1) || true
@@ -356,7 +360,7 @@ service_link() {
   [[ -n $LINK ]] && dokku_log_fail "Already linked as $LINK"
   mkdir -p "$SERVICE_ROOT" || dokku_log_fail "Unable to create service directory"
   touch "$LINKS_FILE"
-  echo "$APP" >> "$LINKS_FILE"
+  echo "$APP:$DATABASE" >> "$LINKS_FILE"
   sort "$LINKS_FILE" -u -o "$LINKS_FILE"
 
   local ALIAS="$PLUGIN_DEFAULT_ALIAS"
@@ -552,19 +556,26 @@ service_promote() {
   local PLUGIN_DEFAULT_CONFIG_VAR="${PLUGIN_DEFAULT_ALIAS}_URL"
   local EXISTING_CONFIG=$(config_all "$APP")
   update_plugin_scheme_for_app "$APP"
-  local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
+  local SERVICE_URL=$(service_url "$SERVICE" "postgres")
+  local CONFIG_VARS=($(echo "$EXISTING_CONFIG" | grep "$SERVICE_URL" | cut -d: -f1)) || true
   local PREVIOUS_DEFAULT_URL=$(get_url_from_config "$EXISTING_CONFIG" "$PLUGIN_DEFAULT_CONFIG_VAR")
-  local USER="postgres"
-  local DATABASE="$SERVICE"
-  local PASSWORD=$(cat "$SERVICE_ROOT/auth/$USER")
-  local SERVICE_URL=$(service_url "$SERVICE" "$USER" "$PASSWORD" "$DATABASE")
-  local CONFIG_VAR=$(echo "$EXISTING_CONFIG" | grep "$SERVICE_URL" | cut -d: -f1) || true
 
-  [[ -z $CONFIG_VAR ]] && dokku_log_fail "Not linked to app $APP"
-  [[ $CONFIG_VAR =~ $PLUGIN_DEFAULT_CONFIG_VAR ]] && dokku_log_fail "Service $1 already promoted as $PLUGIN_DEFAULT_CONFIG_VAR"
+  [[ -z ${CONFIG_VARS[*]} ]] && dokku_log_fail "Not linked to app $APP"
+  [[ ${CONFIG_VARS[*]} =~ $PLUGIN_DEFAULT_CONFIG_VAR ]] && dokku_log_fail "Service $1 already promoted as $PLUGIN_DEFAULT_CONFIG_VAR"
 
-  config_set --no-restart "$APP" "${PLUGIN_DEFAULT_CONFIG_VAR}=$SERVICE_URL"
-  config_set "$APP" "${CONFIG_VAR}=$PREVIOUS_DEFAULT_URL"
+  local NEW_CONFIG_VARS=""
+  if [[ -n $PREVIOUS_DEFAULT_URL ]]; then
+    local PREVIOUS_ALIAS=$(echo "$EXISTING_CONFIG" | grep "$PREVIOUS_DEFAULT_URL" | grep -v "$PLUGIN_DEFAULT_CONFIG_VAR") || true
+    if [[ -z $PREVIOUS_ALIAS ]]; then
+      local ALIAS=$(service_alternative_alias "$EXISTING_CONFIG")
+      NEW_CONFIG_VARS+="${ALIAS}_URL=$PREVIOUS_DEFAULT_URL "
+    fi
+  fi
+  local PROMOTE_URL=$(get_url_from_config "$EXISTING_CONFIG" "${CONFIG_VARS[0]}")
+  NEW_CONFIG_VARS+="$PLUGIN_DEFAULT_CONFIG_VAR=$PROMOTE_URL"
+
+  # shellcheck disable=SC2086
+  config_set "$APP" $NEW_CONFIG_VARS
 }
 
 service_set_alias() {
@@ -613,18 +624,15 @@ service_stop() {
 service_unlink() {
   declare desc="Unlinks an application from a service"
   declare SERVICE="$1" APP="$2"
-  local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
-  local DATABASE=${3:-$(get_database_name "$SERVICE")}
-  local USER=$(get_database_user_name "$SERVICE" "$DATABASE")
-  local PASSWORD=$(cat "$SERVICE_ROOT/auth/$USER")
+  declare DATABASE=${3:-$(get_database_name "$SERVICE")}
   update_plugin_scheme_for_app "$APP"
-  local SERVICE_URL=$(service_url "$SERVICE" "$USER" "$PASSWORD" "$DATABASE")
+  local SERVICE_URL=$(service_url "$SERVICE" "$DATABASE")
   local SERVICE_NAME="$(get_service_name "$SERVICE")"
   local EXISTING_CONFIG=$(config_all "$APP")
   local SERVICE_ALIAS=$(service_alias "$SERVICE")
   local LINK=($(echo "$EXISTING_CONFIG" | grep "$SERVICE_URL" | cut -d: -f1)) || true
 
-  remove_from_links_file "$SERVICE" "$APP"
+  remove_from_links_file "$SERVICE" "$APP" "$DATABASE"
 
   if declare -f -F add_passed_docker_option > /dev/null; then
     # shellcheck disable=SC2034
@@ -734,8 +742,8 @@ verify_database_name() {
   return 0
 }
 
-check_auth_migration() {
-  declare desc="Check whether root credentials need to be migrated into multi-user format and do so if needed"
+check_multidb_migration() {
+  declare desc="Check whether this service needs to be migrated to multi db"
   declare SERVICE="$1"
   [[ ! -n "$SERVICE" ]] && dokku_log_fail "(verify_service_name) SERVICE must not be null"
   local SERVICE_ROOT="$PLUGIN_DATA_ROOT/$SERVICE"
@@ -745,6 +753,11 @@ check_auth_migration() {
     mkdir -p "$AUTH_DIR"
     mv "$SERVICE_ROOT/PASSWORD" "$AUTH_DIR/postgres"
     mkdir -p "$SERVICE_ROOT/databases/"
-    touch "$SERVICE_ROOT/databases/postgres"
+    touch "$SERVICE_ROOT/databases/$SERVICE"
+    # dod the LINKS file
+    #local LINKS_FILE="$SERVICE_ROOT/LINKS"
+    #remove_from_links_file "$SERVICE" "$APP" "$DATABASE"
   fi
+
+
 }
